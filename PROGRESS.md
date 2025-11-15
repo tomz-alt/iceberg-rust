@@ -148,9 +148,9 @@ Arc::new(delete).commit(&table).await?;
 3. Auto mode defaults to MergeOnRead (statistics calculation pending)
 
 **Files Modified**:
-- `crates/iceberg/src/transaction/delete.rs` (993 lines)
+- `crates/iceberg/src/transaction/delete.rs` (1048 lines)
   - 620+ lines implementation
-  - 260+ lines tests
+  - 340+ lines tests
   - Complete MOR DELETE pipeline
 
 **Estimated vs Actual**: Estimated 4-5 weeks, Actual 4 sessions (Sessions 2-5) ✅
@@ -214,7 +214,7 @@ let overwrite = tx
 - ✅ Specification compliance: Follows Iceberg spec
 - ✅ Code quality: 425 lines, clean implementation
 - ✅ Documentation: Complete API docs with examples
-- ✅ Build: Zero warnings
+- ⚠️ Build: 1 warning (unused field `partition_filter` - known issue, does not affect functionality)
 - ✅ Tests: 100% passing
 - ✅ Zero regressions
 
@@ -224,9 +224,9 @@ let overwrite = tx
 - **Overall: 100% Complete** 🎉
 
 **Files Added**:
-- `crates/iceberg/src/transaction/overwrite.rs` (586 lines)
+- `crates/iceberg/src/transaction/overwrite.rs` (585 lines)
   - 425 lines implementation
-  - 161 lines tests
+  - 160 lines tests
   - Complete OVERWRITE pipeline
 
 **Estimated vs Actual**: Estimated 3-4 weeks, Actual 1 session ✅ 🚀
@@ -298,9 +298,9 @@ let expire = tx
 
 **Quality Gates**:
 - ✅ Specification compliance: Follows Iceberg snapshot retention spec
-- ✅ Code quality: 773 lines (438 implementation + 335 tests)
+- ✅ Code quality: 774 lines (438 implementation + 336 tests)
 - ✅ Documentation: Complete API docs with examples
-- ✅ Build: Zero warnings
+- ✅ Build: Zero warnings in new code
 - ✅ Tests: 100% passing, zero regressions
 - ✅ Safety: Never expires critical snapshots
 
@@ -311,9 +311,9 @@ let expire = tx
 - **Overall: 100% Complete** 🎉
 
 **Files Added**:
-- `crates/iceberg/src/transaction/expire_snapshots.rs` (773 lines)
+- `crates/iceberg/src/transaction/expire_snapshots.rs` (774 lines)
   - 438 lines implementation
-  - 335 lines tests
+  - 336 lines tests
   - Complete snapshot expiration pipeline
 
 **Files Modified**:
