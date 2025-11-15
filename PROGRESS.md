@@ -65,20 +65,31 @@ pub fn position_delete_schema() -> ArrowSchemaRef
 
 **Estimated vs Actual**: Estimated 2-3 weeks, Actual 1 session ✅
 
+**File**: `crates/iceberg/src/writer/base_writer/position_delete_writer.rs` (710 lines)
+**Commit**: `ddb6cf6` - feat(writer): Implement PositionDeleteFileWriter for DELETE operations
+
 ---
 
-### 🔄 Week 4-8: DELETE Operation (NEXT)
+### 🔄 Week 4-8: DELETE Operation (IN PROGRESS)
 
-**Status**: ⏳ Not Started
+**Status**: 🟡 API Designed, Implementation Pending
 **Dependencies**: ✅ PositionDeleteFileWriter (completed)
 
-**Planned Components**:
-1. `DeleteAction` transaction type
-2. Delete mode selection (COW vs MOR vs Auto)
-3. Table scanning to find affected files
-4. Position delete writing for MOR mode
-5. Data file rewriting for COW mode
-6. Snapshot management and commit
+**Completed Components** (Session 2):
+- ✅ `DeleteAction` API design with full builder pattern
+- ✅ `DeleteMode` enum (MergeOnRead, CopyOnWrite, Auto with threshold)
+- ✅ Integration with `Transaction::delete()` method
+- ✅ Unit tests for API surface and mode selection
+- ✅ Complete documentation and examples
+- ✅ Builds cleanly with clear TODOs for implementation
+
+**Remaining Components** (Next Session):
+1. Table scanning to find affected files
+2. Filter application to identify matching rows
+3. Position delete writing for MOR mode (using PositionDeleteFileWriter)
+4. Data file rewriting for COW mode
+5. Snapshot management and commit
+6. Integration and compatibility tests
 
 **Key Implementation**:
 ```rust
@@ -320,7 +331,8 @@ services:
 | Milestone | Planned | Actual | Status | Notes |
 |-----------|---------|--------|--------|-------|
 | Position Delete Writer | Weeks 1-3 | Week 1 | ✅ Complete | Ahead of schedule |
-| DELETE Operation | Weeks 4-8 | TBD | ⏳ Pending | Starting next |
+| DELETE Operation (API) | Week 4 | Week 1-2 | ✅ Complete | API designed |
+| DELETE Operation (Full) | Weeks 4-8 | TBD | 🟡 In Progress | Implementation pending |
 | OVERWRITE Operation | Weeks 9-12 | TBD | ⏳ Pending | |
 | Snapshot Expiration | Weeks 13-16 | TBD | ⏳ Pending | |
 | Phase 1 Complete | Week 16 | TBD | ⏳ Pending | Target: Alpha release |
@@ -370,7 +382,105 @@ A component is "done" when:
 
 ---
 
-**Last Updated**: 2024-11-15
-**Current Phase**: Phase 1, Week 1-3
-**Next Milestone**: DELETE Operation (Week 4-8)
+**Last Updated**: 2024-11-15 (Session 2)
+**Current Phase**: Phase 1, Week 1-8 (DELETE Operation)
+**Next Milestone**: Complete DELETE Operation Implementation
 **Overall Status**: 🟢 On Track, Ahead of Schedule
+
+---
+
+## Session 2 Summary (DELETE Operation API)
+
+**Date**: 2024-11-15
+**Duration**: ~1 hour
+**Goal**: Design and implement DELETE operation API
+
+### Accomplishments
+
+1. ✅ **DELETE Operation API Designed**
+   - Created `crates/iceberg/src/transaction/delete.rs` (455 lines)
+   - Full builder API with three execution modes
+   - Comprehensive documentation and examples
+   - Commit: `e7467bc`
+
+2. ✅ **Execution Modes Implemented**:
+   - `DeleteMode::MergeOnRead`: Write position deletes (fast writes)
+   - `DeleteMode::CopyOnWrite`: Rewrite data files (fast reads)
+   - `DeleteMode::Auto`: Heuristic-based selection (default 20% threshold)
+
+3. ✅ **Transaction Integration**:
+   - Added `Transaction::delete()` method
+   - Follows existing patterns (fast_append, etc.)
+   - Builder pattern for easy configuration
+
+4. ✅ **Testing**:
+   - Unit tests for mode selection
+   - API builder tests
+   - Auto mode threshold clamping
+   - All tests pass
+
+### Code Structure
+
+```rust
+// User-facing API
+let tx = Transaction::new(&table);
+let delete_action = tx
+    .delete()
+    .with_filter(Reference::new("age").greater_than(Datum::int(100)))
+    .with_auto_mode(0.2);  // COW if >20% deleted
+let tx = delete_action.apply(tx)?;
+```
+
+### Implementation Status
+
+**API Layer**: ✅ 100% Complete
+- `DeleteAction` struct
+- `DeleteMode` enum
+- Builder methods
+- Transaction integration
+- Documentation
+
+**Execution Layer**: ⏳ 0% Complete (Next Session)
+- Table scanning with filters
+- Row position identification
+- Position delete file writing
+- Data file rewriting
+- Snapshot creation
+
+### Next Steps
+
+1. **Implement table scanning logic**
+   - Use `table.scan().with_filter().plan_files()`
+   - Identify affected data files
+
+2. **Implement MOR strategy** (Priority)
+   - Read affected files
+   - Apply filter to find matching rows
+   - Use `PositionDeleteFileWriter` to write deletes
+   - Create snapshot with delete files
+
+3. **Implement COW strategy**
+   - Rewrite data files without deleted rows
+   - Create snapshot with new files, remove old files
+
+4. **Add integration tests**
+   - End-to-end DELETE operations
+   - Verify with Parquet file inspection
+   - Test both MOR and COW modes
+
+5. **Add compatibility tests**
+   - Rust DELETE → Java Spark read
+   - Verify deleted rows don't appear
+   - Test snapshot metadata correctness
+
+### Files Changed
+- New: `crates/iceberg/src/transaction/delete.rs`
+- Modified: `crates/iceberg/src/transaction/mod.rs`
+
+### Quality Metrics
+- ✅ Builds without errors
+- ✅ Unit tests pass
+- ✅ Documentation complete
+- ✅ Follows project patterns
+- ⏳ Integration tests pending
+- ⏳ Full implementation pending
