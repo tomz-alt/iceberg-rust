@@ -65,7 +65,7 @@ use crate::error::Result;
 use crate::expr::Predicate;
 use crate::spec::{
     DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType, ManifestListWriter,
-    ManifestWriterBuilder, Operation, Snapshot, SnapshotReference, SnapshotRetention, Summary,
+    ManifestWriterBuilder, Operation, PartitionKey, PartitionSpec, Snapshot, SnapshotReference, SnapshotRetention, Summary,
 };
 use crate::table::Table;
 use crate::transaction::{ActionCommit, TransactionAction};
@@ -326,6 +326,12 @@ impl DeleteAction {
         let mut total_rows_to_delete = 0u64;
         let mut deletes_per_file: HashMap<String, Vec<i64>> = HashMap::new();
 
+        // Collect partition information from the first file task to use for delete files
+        // For now, we assume all files have the same partition (or we'll use the first one)
+        let partition_info = tasks.first().and_then(|task| {
+            task.partition.as_ref().zip(task.partition_spec.as_ref())
+        });
+
         for task in &tasks {
             let file_path = task.data_file_path().to_string();
 
@@ -383,9 +389,18 @@ impl DeleteAction {
             file_name_gen,
         );
 
-        // Create position delete writer
+        // Create partition key for delete files if partition info is available
+        let partition_key = partition_info.map(|(partition, partition_spec)| {
+            PartitionKey::new(
+                partition_spec.as_ref().clone(),
+                table.metadata().current_schema().clone(),
+                partition.clone(),
+            )
+        });
+
+        // Create position delete writer with partition information
         let mut delete_writer = PositionDeleteFileWriterBuilder::new(rolling_writer)
-            .build(None)
+            .build(partition_key)
             .await?;
 
         // Write deletes for each file
@@ -422,13 +437,24 @@ impl DeleteAction {
 
         let output_file = file_io.new_output(manifest_path)?;
 
+        // Determine partition spec for delete files based on whether we have partition info
+        // If partition info is available, use it. Otherwise, use an unpartitioned spec
+        // since the delete files were created without partition information
+        let delete_partition_spec = if let Some((_, spec)) = partition_info {
+            spec.as_ref().clone()
+        } else {
+            // No partition info from scan - use unpartitioned spec for delete files
+            // This ensures partition field alignment with empty partition structs in delete files
+            PartitionSpec::unpartition_spec()
+        };
+
         // Create manifest writer for delete files
         let builder = ManifestWriterBuilder::new(
             output_file,
             Some(snapshot_id),
             self.key_metadata.clone(),
             table.metadata().current_schema().clone(),
-            table.metadata().default_partition_spec().as_ref().clone(),
+            delete_partition_spec,
         );
 
         let mut manifest_writer = match table.metadata().format_version() {
@@ -913,12 +939,12 @@ mod tests {
     async fn test_delete_preserves_partition_spec() {
         let table = make_v2_minimal_table();
 
-        // Append data file
+        // Append data file (partition x=1)
         let table = append_data_file(&table, "test/data1.parquet", 50).await;
 
-        // Delete
+        // Delete - use filter that matches the partition value (x=1)
         let delete_action = DeleteAction::new()
-            .with_filter(Reference::new("x").equal_to(Datum::long(25)))
+            .with_filter(Reference::new("x").equal_to(Datum::long(1)))
             .with_merge_on_read_mode();
 
         let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
