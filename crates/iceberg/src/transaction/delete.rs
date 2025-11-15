@@ -725,4 +725,271 @@ mod tests {
             _ => panic!("Should be Auto mode"),
         }
     }
+
+    // Integration tests
+    use crate::spec::{DataContentType, DataFileBuilder, DataFileFormat, Literal, Struct};
+    use crate::transaction::tests::make_v2_minimal_table;
+    use crate::transaction::{Transaction, TransactionAction};
+    use crate::{TableRequirement, TableUpdate};
+
+    #[tokio::test]
+    async fn test_delete_requires_filter() {
+        let table = make_v2_minimal_table();
+
+        // DELETE without filter should fail
+        let delete_action = DeleteAction::new();
+        let result = Arc::new(delete_action).commit(&table).await;
+
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.kind(), ErrorKind::DataInvalid);
+            assert!(err.message().contains("requires a filter predicate"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_no_matching_files() {
+        let table = make_v2_minimal_table();
+
+        // DELETE with filter that matches nothing
+        let delete_action = DeleteAction::new()
+            .with_filter(Reference::new("id").greater_than(Datum::int(9999)))
+            .with_merge_on_read_mode();
+
+        let result = Arc::new(delete_action).commit(&table).await;
+
+        // Should error because no files match the filter
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.kind(), ErrorKind::DataInvalid);
+            assert!(err.message().contains("No files found matching delete filter"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_copy_on_write_not_implemented() {
+        let table = make_v2_minimal_table();
+
+        let delete_action = DeleteAction::new()
+            .with_filter(Reference::new("id").equal_to(Datum::int(1)))
+            .with_copy_on_write_mode();
+
+        let result = Arc::new(delete_action).commit(&table).await;
+
+        // CopyOnWrite is not yet implemented
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.kind(), ErrorKind::FeatureUnsupported);
+            assert!(err.message().contains("CopyOnWrite delete mode not yet implemented"));
+        }
+    }
+
+    /// Helper function to append data files to a table and return updated table
+    async fn append_data_file(table: &crate::table::Table, file_path: &str, record_count: u64) -> crate::table::Table {
+        let tx = Transaction::new(table);
+        let data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path(file_path.to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(1024)
+            .record_count(record_count)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::from_iter([Some(Literal::long(1))]))
+            .build()
+            .unwrap();
+
+        let action = tx.fast_append().add_data_files(vec![data_file]);
+        let mut action_commit = Arc::new(action).commit(table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        // Apply updates to get new table state
+        let mut metadata_builder = table.metadata().clone().into_builder(None);
+        for update in updates {
+            metadata_builder = update.apply(metadata_builder).unwrap();
+        }
+
+        table.clone().with_metadata(Arc::new(metadata_builder.build().unwrap().metadata))
+    }
+
+    #[tokio::test]
+    async fn test_delete_merge_on_read_basic() {
+        let table = make_v2_minimal_table();
+
+        // First, append a data file
+        let table = append_data_file(&table, "test/data1.parquet", 100).await;
+
+        // Verify table has data
+        let snapshot = table.metadata().current_snapshot().unwrap();
+        let manifest_list = snapshot
+            .load_manifest_list(table.file_io(), table.metadata())
+            .await
+            .unwrap();
+        assert_eq!(manifest_list.entries().len(), 1);
+
+        // Now delete with MergeOnRead
+        let delete_action = DeleteAction::new()
+            .with_filter(Reference::new("id").greater_than(Datum::int(50)))
+            .with_merge_on_read_mode();
+
+        let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
+        let updates = action_commit.take_updates();
+        let requirements = action_commit.take_requirements();
+
+        // Verify updates structure
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(updates[0], TableUpdate::AddSnapshot { .. }));
+        assert!(matches!(updates[1], TableUpdate::SetSnapshotRef { .. }));
+
+        // Verify requirements
+        assert_eq!(requirements.len(), 2);
+        assert!(matches!(requirements[0], TableRequirement::UuidMatch { .. }));
+        assert!(matches!(requirements[1], TableRequirement::RefSnapshotIdMatch { .. }));
+
+        // Check snapshot details
+        let new_snapshot = if let TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            snapshot
+        } else {
+            unreachable!()
+        };
+
+        // Verify snapshot operation is Delete
+        assert_eq!(new_snapshot.summary().operation, Operation::Delete);
+
+        // Verify summary properties
+        assert_eq!(
+            new_snapshot.summary().additional_properties.get("deleted-data-files").unwrap(),
+            "1"
+        );
+        assert_eq!(
+            new_snapshot.summary().additional_properties.get("deleted-records").unwrap(),
+            "100" // Conservative: deletes all rows from matched file
+        );
+
+        // Verify manifest list contains both data and delete manifests
+        let manifest_list = new_snapshot
+            .load_manifest_list(table.file_io(), table.metadata())
+            .await
+            .unwrap();
+
+        // Should have 2 manifests: 1 data (from original) + 1 delete (new)
+        assert_eq!(manifest_list.entries().len(), 2);
+
+        // Find data and delete manifests
+        let data_manifests: Vec<_> = manifest_list
+            .entries()
+            .iter()
+            .filter(|m| m.content == ManifestContentType::Data)
+            .collect();
+        let delete_manifests: Vec<_> = manifest_list
+            .entries()
+            .iter()
+            .filter(|m| m.content == ManifestContentType::Deletes)
+            .collect();
+
+        assert_eq!(data_manifests.len(), 1, "Should have 1 data manifest");
+        assert_eq!(delete_manifests.len(), 1, "Should have 1 delete manifest");
+
+        // Verify delete manifest contains delete files
+        let delete_manifest = delete_manifests[0]
+            .load_manifest(table.file_io())
+            .await
+            .unwrap();
+        assert_eq!(delete_manifest.entries().len(), 1);
+
+        // Verify delete file is PositionDeletes
+        let delete_entry = &delete_manifest.entries()[0];
+        assert_eq!(delete_entry.data_file().content, DataContentType::PositionDeletes);
+        assert_eq!(delete_entry.data_file().record_count, 100); // All positions from the file
+    }
+
+    #[tokio::test]
+    async fn test_delete_preserves_partition_spec() {
+        let table = make_v2_minimal_table();
+
+        // Append data file
+        let table = append_data_file(&table, "test/data1.parquet", 50).await;
+
+        // Delete
+        let delete_action = DeleteAction::new()
+            .with_filter(Reference::new("id").equal_to(Datum::int(25)))
+            .with_merge_on_read_mode();
+
+        let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        let new_snapshot = if let TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            snapshot
+        } else {
+            unreachable!()
+        };
+
+        // Verify schema ID is preserved
+        assert_eq!(new_snapshot.schema_id(), Some(table.metadata().current_schema_id()));
+    }
+
+    #[tokio::test]
+    async fn test_delete_multiple_files() {
+        let table = make_v2_minimal_table();
+
+        // Append multiple data files
+        let table = append_data_file(&table, "test/data1.parquet", 100).await;
+        let table = append_data_file(&table, "test/data2.parquet", 200).await;
+        let table = append_data_file(&table, "test/data3.parquet", 150).await;
+
+        // Delete with filter that matches multiple files
+        let delete_action = DeleteAction::new()
+            .with_filter(Reference::new("id").greater_than(Datum::int(0)))
+            .with_merge_on_read_mode();
+
+        let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        let new_snapshot = if let TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            snapshot
+        } else {
+            unreachable!()
+        };
+
+        // Should delete all 3 files
+        assert_eq!(
+            new_snapshot.summary().additional_properties.get("deleted-data-files").unwrap(),
+            "3"
+        );
+        assert_eq!(
+            new_snapshot.summary().additional_properties.get("deleted-records").unwrap(),
+            "450" // 100 + 200 + 150
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_custom_snapshot_properties() {
+        let table = make_v2_minimal_table();
+
+        // Append data
+        let table = append_data_file(&table, "test/data1.parquet", 100).await;
+
+        // Delete with custom properties
+        let mut custom_props = std::collections::HashMap::new();
+        custom_props.insert("custom-key".to_string(), "custom-value".to_string());
+
+        let delete_action = DeleteAction::new()
+            .with_filter(Reference::new("id").less_than(Datum::int(50)))
+            .with_merge_on_read_mode()
+            .set_snapshot_properties(custom_props);
+
+        let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        let new_snapshot = if let TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            snapshot
+        } else {
+            unreachable!()
+        };
+
+        // Verify custom property is included
+        assert_eq!(
+            new_snapshot.summary().additional_properties.get("custom-key").unwrap(),
+            "custom-value"
+        );
+    }
 }
