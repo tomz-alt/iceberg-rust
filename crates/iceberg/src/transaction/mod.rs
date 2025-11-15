@@ -54,6 +54,7 @@ mod action;
 
 pub use action::*;
 mod append;
+mod delete;
 mod snapshot;
 mod sort_order;
 mod update_location;
@@ -71,6 +72,7 @@ use crate::spec::TableProperties;
 use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
+use crate::transaction::delete::DeleteAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
 use crate::transaction::update_properties::UpdatePropertiesAction;
@@ -139,6 +141,34 @@ impl Transaction {
     /// Creates a fast append action.
     pub fn fast_append(&self) -> FastAppendAction {
         FastAppendAction::new()
+    }
+
+    /// Creates a DELETE action.
+    ///
+    /// The DELETE action removes rows from the table based on a filter predicate.
+    /// You must specify which rows to delete using `.with_filter()`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use iceberg::transaction::Transaction;
+    /// use iceberg::expr::Reference;
+    /// # use iceberg::Result;
+    ///
+    /// # fn example(table: iceberg::table::Table) -> Result<()> {
+    /// let tx = Transaction::new(&table);
+    ///
+    /// // Delete rows where age > 100
+    /// let delete_action = tx
+    ///     .delete()
+    ///     .with_filter(Reference::new("age").greater_than(100));
+    ///
+    /// let tx = delete_action.apply(tx)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn delete(&self) -> DeleteAction {
+        DeleteAction::new()
     }
 
     /// Creates replace sort order action.
