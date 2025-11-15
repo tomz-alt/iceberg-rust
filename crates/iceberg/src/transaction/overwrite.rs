@@ -369,10 +369,46 @@ impl SnapshotProduceOperation for StaticOverwriteOperation {
 mod tests {
     use super::*;
     use crate::expr::Reference;
-    use crate::spec::Datum;
+    use crate::spec::{DataFileBuilder, DataFileFormat, Datum, Literal, ManifestContentType, Struct};
+    use crate::transaction::Transaction;
 
     fn make_v2_minimal_table() -> Table {
         crate::transaction::tests::make_v2_minimal_table()
+    }
+
+    /// Helper to append a data file to a table for testing
+    async fn append_data_file(
+        table: &Table,
+        file_path: &str,
+        record_count: u64,
+    ) -> Table {
+        let tx = Transaction::new(table);
+
+        let data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path(file_path.to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(1024)
+            .record_count(record_count)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::from_iter([Some(Literal::long(1))]))
+            .build()
+            .unwrap();
+
+        let action = tx.fast_append().add_data_files(vec![data_file]);
+
+        let mut action_commit = Arc::new(action).commit(table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        // Apply updates to get new table state
+        let mut metadata_builder = table.metadata().clone().into_builder(None);
+        for update in updates {
+            metadata_builder = update.apply(metadata_builder).unwrap();
+        }
+
+        table
+            .clone()
+            .with_metadata(Arc::new(metadata_builder.build().unwrap().metadata))
     }
 
     #[test]
@@ -421,5 +457,129 @@ mod tests {
                 .to_string()
                 .contains("Cannot perform overwrite without any data files"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_static_overwrite_basic() {
+        let table = make_v2_minimal_table();
+
+        // Append initial data
+        let table = append_data_file(&table, "test/data1.parquet", 100).await;
+
+        // Verify initial data exists
+        let snapshot = table.metadata().current_snapshot().unwrap();
+        assert_eq!(snapshot.summary().operation, Operation::Append);
+
+        // Create new data file to overwrite with
+        let new_data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path("test/new_data.parquet".to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(2048)
+            .record_count(200)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::from_iter([Some(Literal::long(1))]))
+            .build()
+            .unwrap();
+
+        // Perform static overwrite
+        let overwrite_action = OverwriteAction::new()
+            .with_static_mode()
+            .with_data_files(vec![new_data_file]);
+
+        let mut action_commit = Arc::new(overwrite_action).commit(&table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        // Verify snapshot
+        let new_snapshot = if let crate::TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            snapshot
+        } else {
+            panic!("Expected AddSnapshot update");
+        };
+
+        assert_eq!(new_snapshot.summary().operation, Operation::Overwrite);
+
+        // Verify we have updates
+        assert!(!updates.is_empty());
+        assert!(matches!(updates[0], crate::TableUpdate::AddSnapshot { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_overwrite_partition() {
+        let table = make_v2_minimal_table();
+
+        // Append initial data with partition x=1
+        let table = append_data_file(&table, "test/data1.parquet", 100).await;
+
+        // Create new data file for same partition
+        let new_data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path("test/new_data.parquet".to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(2048)
+            .record_count(200)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::from_iter([Some(Literal::long(1))]))
+            .build()
+            .unwrap();
+
+        // Perform dynamic overwrite for partition x=1
+        let overwrite_action = OverwriteAction::new()
+            .with_partition_filter(Reference::new("x").equal_to(Datum::long(1)))
+            .with_data_files(vec![new_data_file]);
+
+        let mut action_commit = Arc::new(overwrite_action).commit(&table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        // Verify snapshot
+        let new_snapshot = if let crate::TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            snapshot
+        } else {
+            panic!("Expected AddSnapshot update");
+        };
+
+        assert_eq!(new_snapshot.summary().operation, Operation::Overwrite);
+
+        // Verify we have updates
+        assert!(!updates.is_empty());
+        assert!(matches!(updates[0], crate::TableUpdate::AddSnapshot { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_with_custom_properties() {
+        let table = make_v2_minimal_table();
+
+        let new_data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path("test/data.parquet".to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(1024)
+            .record_count(50)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::from_iter([Some(Literal::long(1))]))
+            .build()
+            .unwrap();
+
+        let mut custom_props = HashMap::new();
+        custom_props.insert("custom-key".to_string(), "custom-value".to_string());
+
+        let overwrite_action = OverwriteAction::new()
+            .with_data_files(vec![new_data_file])
+            .set_snapshot_properties(custom_props);
+
+        let mut action_commit = Arc::new(overwrite_action).commit(&table).await.unwrap();
+        let updates = action_commit.take_updates();
+
+        let new_snapshot = if let crate::TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            snapshot
+        } else {
+            panic!("Expected AddSnapshot update");
+        };
+
+        // Verify custom property is present
+        assert_eq!(
+            new_snapshot.summary().additional_properties.get("custom-key").unwrap(),
+            "custom-value"
+        );
     }
 }
