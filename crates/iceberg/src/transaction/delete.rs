@@ -57,12 +57,28 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
+use parquet::file::properties::WriterProperties;
 use uuid::Uuid;
 
+use crate::arrow::arrow_schema_to_schema;
 use crate::error::Result;
 use crate::expr::Predicate;
+use crate::spec::{
+    DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType, ManifestListWriter,
+    ManifestWriterBuilder, Operation, Snapshot, SnapshotReference, SnapshotRetention, Summary,
+};
 use crate::table::Table;
 use crate::transaction::{ActionCommit, TransactionAction};
+use crate::{TableRequirement, TableUpdate};
+use crate::writer::base_writer::position_delete_writer::{
+    PositionDeleteFileWriterBuilder, position_delete_schema,
+};
+use crate::writer::file_writer::location_generator::{
+    DefaultFileNameGenerator, DefaultLocationGenerator,
+};
+use crate::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
+use crate::writer::file_writer::ParquetWriterBuilder;
+use crate::writer::{IcebergWriter, IcebergWriterBuilder};
 use crate::{Error, ErrorKind};
 
 /// Internal execution mode (resolved from DeleteMode).
@@ -338,25 +354,235 @@ impl DeleteAction {
             ));
         }
 
-        // TODO Step 3: Write position delete files using PositionDeleteFileWriter
-        // TODO Step 4: Create delete manifests
-        // TODO Step 5: Create snapshot with delete files
-        // TODO Step 6: Return ActionCommit
+        // Step 3: Write position delete files using PositionDeleteFileWriter
 
-        Err(Error::new(
-            ErrorKind::FeatureUnsupported,
-            format!(
-                "MergeOnRead DELETE partially implemented. \
-                Identified {} file(s) affecting {} row(s). \
-                Next steps: \
-                1) Initialize PositionDeleteFileWriter, \
-                2) Write delete files, \
-                3) Create delete manifests, \
-                4) Create snapshot and return ActionCommit.",
-                deletes_per_file.len(),
-                total_rows_to_delete
+        // Set up writer infrastructure
+        let file_io = table.file_io().clone();
+        let location_gen = DefaultLocationGenerator::new(table.metadata_ref().as_ref().clone())?;
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "delete".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
+
+        // Create position delete schema
+        let arrow_schema = position_delete_schema();
+        let schema = Arc::new(arrow_schema_to_schema(&arrow_schema)?);
+
+        // Set up Parquet writer
+        let parquet_writer = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            schema.clone(),
+        );
+
+        // Create rolling file writer
+        let rolling_writer = RollingFileWriterBuilder::new_with_default_file_size(
+            parquet_writer,
+            file_io.clone(),
+            location_gen,
+            file_name_gen,
+        );
+
+        // Create position delete writer
+        let mut delete_writer = PositionDeleteFileWriterBuilder::new(rolling_writer)
+            .build(None)
+            .await?;
+
+        // Write deletes for each file
+        for (file_path, positions) in deletes_per_file.iter() {
+            delete_writer
+                .write_deletes(file_path, positions.iter().copied())
+                .await?;
+        }
+
+        // Close writer and get delete files
+        let delete_files = delete_writer.close().await?;
+
+        if delete_files.is_empty() {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "No delete files were written. This should not happen.",
+            ));
+        }
+
+        // Step 4: Create delete manifest
+
+        // Generate unique snapshot ID and commit UUID
+        let snapshot_id = Self::generate_unique_snapshot_id(table);
+        let commit_uuid = self.commit_uuid.unwrap_or_else(Uuid::now_v7);
+
+        // Create manifest file path
+        const META_ROOT_PATH: &str = "metadata";
+        let manifest_path = format!(
+            "{}/{}/{}-m0.avro",
+            table.metadata().location(),
+            META_ROOT_PATH,
+            commit_uuid
+        );
+
+        let output_file = file_io.new_output(manifest_path)?;
+
+        // Create manifest writer for delete files
+        let builder = ManifestWriterBuilder::new(
+            output_file,
+            Some(snapshot_id),
+            self.key_metadata.clone(),
+            table.metadata().current_schema().clone(),
+            table.metadata().default_partition_spec().as_ref().clone(),
+        );
+
+        let mut manifest_writer = match table.metadata().format_version() {
+            FormatVersion::V1 => {
+                return Err(Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    "DELETE operation requires table format version 2 or higher. \
+                    Position deletes are not supported in v1 tables.",
+                ));
+            }
+            FormatVersion::V2 => builder.build_v2_deletes(),
+            FormatVersion::V3 => builder.build_v3_deletes(),
+        };
+
+        // Add delete files as manifest entries
+        let next_seq_num = table.metadata().next_sequence_number();
+        for delete_file in delete_files {
+            manifest_writer.add_file(delete_file, next_seq_num)?;
+        }
+
+        // Write manifest and get ManifestFile
+        let delete_manifest = manifest_writer.write_manifest_file().await?;
+
+        // Step 5: Create snapshot with delete manifest
+
+        // Create manifest list
+        let manifest_list_path = format!(
+            "{}/{}/snap-{}-0-{}.avro",
+            table.metadata().location(),
+            META_ROOT_PATH,
+            snapshot_id,
+            commit_uuid
+        );
+
+        let mut manifest_list_writer = match table.metadata().format_version() {
+            FormatVersion::V1 => unreachable!("V1 check already performed"),
+            FormatVersion::V2 => ManifestListWriter::v2(
+                file_io.new_output(manifest_list_path.clone())?,
+                snapshot_id,
+                table.metadata().current_snapshot_id(),
+                next_seq_num,
             ),
-        ))
+            FormatVersion::V3 => {
+                let first_row_id = table.metadata().next_row_id();
+                ManifestListWriter::v3(
+                    file_io.new_output(manifest_list_path.clone())?,
+                    snapshot_id,
+                    table.metadata().current_snapshot_id(),
+                    next_seq_num,
+                    Some(first_row_id),
+                )
+            }
+        };
+
+        // Get existing data manifests from current snapshot
+        let mut manifests = vec![];
+        if let Some(current_snapshot) = table.metadata().current_snapshot() {
+            let manifest_list = current_snapshot
+                .load_manifest_list(&file_io, &table.metadata_ref())
+                .await?;
+            // Keep existing data manifests (we're only adding delete manifests)
+            manifests.extend(
+                manifest_list
+                    .entries()
+                    .iter()
+                    .filter(|m| m.content == ManifestContentType::Data)
+                    .cloned(),
+            );
+        }
+
+        // Add the delete manifest
+        manifests.push(delete_manifest);
+
+        // Add all manifests to manifest list
+        manifest_list_writer.add_manifests(manifests.into_iter())?;
+        manifest_list_writer.close().await?;
+
+        // Create snapshot summary
+        let mut additional_properties = self.snapshot_properties.clone();
+        additional_properties.insert(
+            "deleted-data-files".to_string(),
+            deletes_per_file.len().to_string(),
+        );
+        additional_properties.insert(
+            "deleted-records".to_string(),
+            total_rows_to_delete.to_string(),
+        );
+
+        let summary = Summary {
+            operation: Operation::Delete,
+            additional_properties,
+        };
+
+        // Build the snapshot
+        let commit_ts = chrono::Utc::now().timestamp_millis();
+        let new_snapshot = Snapshot::builder()
+            .with_manifest_list(manifest_list_path)
+            .with_snapshot_id(snapshot_id)
+            .with_parent_snapshot_id(table.metadata().current_snapshot_id())
+            .with_sequence_number(next_seq_num)
+            .with_summary(summary)
+            .with_schema_id(table.metadata().current_schema_id())
+            .with_timestamp_ms(commit_ts)
+            .build();
+
+        // Step 6: Return ActionCommit
+
+        let updates = vec![
+            TableUpdate::AddSnapshot {
+                snapshot: new_snapshot,
+            },
+            TableUpdate::SetSnapshotRef {
+                ref_name: MAIN_BRANCH.to_string(),
+                reference: SnapshotReference::new(
+                    snapshot_id,
+                    SnapshotRetention::branch(None, None, None),
+                ),
+            },
+        ];
+
+        let requirements = vec![
+            TableRequirement::UuidMatch {
+                uuid: table.metadata().uuid(),
+            },
+            TableRequirement::RefSnapshotIdMatch {
+                r#ref: MAIN_BRANCH.to_string(),
+                snapshot_id: table.metadata().current_snapshot_id(),
+            },
+        ];
+
+        Ok(ActionCommit::new(updates, requirements))
+    }
+
+    /// Generate a unique snapshot ID for the table.
+    fn generate_unique_snapshot_id(table: &Table) -> i64 {
+        let generate_random_id = || -> i64 {
+            let (lhs, rhs) = Uuid::new_v4().as_u64_pair();
+            let snapshot_id = (lhs ^ rhs) as i64;
+            if snapshot_id < 0 {
+                -snapshot_id
+            } else {
+                snapshot_id
+            }
+        };
+        let mut snapshot_id = generate_random_id();
+
+        while table
+            .metadata()
+            .snapshots()
+            .any(|s| s.snapshot_id() == snapshot_id)
+        {
+            snapshot_id = generate_random_id();
+        }
+        snapshot_id
     }
 }
 
