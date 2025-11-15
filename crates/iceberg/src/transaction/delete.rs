@@ -753,7 +753,7 @@ mod tests {
 
         // DELETE with filter that matches nothing
         let delete_action = DeleteAction::new()
-            .with_filter(Reference::new("id").greater_than(Datum::int(9999)))
+            .with_filter(Reference::new("x").greater_than(Datum::long(9999)))
             .with_merge_on_read_mode();
 
         let result = Arc::new(delete_action).commit(&table).await;
@@ -771,7 +771,7 @@ mod tests {
         let table = make_v2_minimal_table();
 
         let delete_action = DeleteAction::new()
-            .with_filter(Reference::new("id").equal_to(Datum::int(1)))
+            .with_filter(Reference::new("x").equal_to(Datum::long(1)))
             .with_copy_on_write_mode();
 
         let result = Arc::new(delete_action).commit(&table).await;
@@ -826,9 +826,16 @@ mod tests {
             .unwrap();
         assert_eq!(manifest_list.entries().len(), 1);
 
+        // Verify manifest has entries
+        let manifest = manifest_list.entries()[0]
+            .load_manifest(table.file_io())
+            .await
+            .unwrap();
+        assert_eq!(manifest.entries().len(), 1);
+
         // Now delete with MergeOnRead
         let delete_action = DeleteAction::new()
-            .with_filter(Reference::new("id").greater_than(Datum::int(50)))
+            .with_filter(Reference::new("x").greater_than(Datum::long(0)))
             .with_merge_on_read_mode();
 
         let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
@@ -911,7 +918,7 @@ mod tests {
 
         // Delete
         let delete_action = DeleteAction::new()
-            .with_filter(Reference::new("id").equal_to(Datum::int(25)))
+            .with_filter(Reference::new("x").equal_to(Datum::long(25)))
             .with_merge_on_read_mode();
 
         let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
@@ -938,7 +945,7 @@ mod tests {
 
         // Delete with filter that matches multiple files
         let delete_action = DeleteAction::new()
-            .with_filter(Reference::new("id").greater_than(Datum::int(0)))
+            .with_filter(Reference::new("x").greater_than(Datum::long(0)))
             .with_merge_on_read_mode();
 
         let mut action_commit = Arc::new(delete_action).commit(&table).await.unwrap();
@@ -973,7 +980,7 @@ mod tests {
         custom_props.insert("custom-key".to_string(), "custom-value".to_string());
 
         let delete_action = DeleteAction::new()
-            .with_filter(Reference::new("id").less_than(Datum::int(50)))
+            .with_filter(Reference::new("x").less_than(Datum::long(50)))
             .with_merge_on_read_mode()
             .set_snapshot_properties(custom_props);
 
