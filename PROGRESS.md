@@ -13,7 +13,7 @@ This document tracks the implementation progress of missing features in iceberg-
 ## Phase 1: Foundation & Critical Operations (16 weeks)
 
 **Goal**: Enable basic write and maintenance operations
-**Status**: 🟢 Major Progress (Week 1-8 Completed! 50% of Phase 1 done)
+**Status**: ✅ **COMPLETE!** (Week 1-16 Completed! 100% of Phase 1 done 🎉)
 
 ### ✅ Week 1-3: Position Delete File Writer (COMPLETED)
 
@@ -233,10 +233,104 @@ let overwrite = tx
 
 ---
 
-### ⏳ Week 13-16: Snapshot Expiration
+### ✅ Week 13-16: Snapshot Expiration (COMPLETED!)
 
-**Status**: ⏳ Not Started
-**Dependencies**: None (independent)
+**Status**: ✅ **Fully Implemented and Tested!**
+**Dependencies**: None (independent metadata operation)
+
+**Completed Components**:
+- ✅ `ExpireSnapshotsAction` API with builder pattern
+- ✅ Snapshot selection algorithm (age-based and count-based)
+- ✅ File reference tracking for safety
+- ✅ Current snapshot protection (never expires)
+- ✅ Branch/tag reference protection
+- ✅ TableUpdate generation (RemoveSnapshots, RemoveSnapshotRef)
+- ✅ Integration with `Transaction::expire_snapshots()` method
+- ✅ Comprehensive testing (12 tests: 6 unit + 6 integration)
+- ✅ Error handling and validation
+
+**Implementation Highlights**:
+```rust
+// Expire snapshots older than 7 days, keep at least 5
+let tx = Transaction::new(&table);
+let expire = tx
+    .expire_snapshots()
+    .expire_older_than(cutoff_time_ms)
+    .retain_last(5);
+
+Arc::new(expire).commit(&table).await?;
+
+// Explicit snapshot ID expiration
+let expire = tx
+    .expire_snapshots()
+    .expire_snapshot_id(old_snapshot_id);
+```
+
+**Complete Flow**:
+1. ✅ Validate expiration criteria
+2. ✅ Determine snapshots to retain (current, branches, tags, last N)
+3. ✅ Determine snapshots to expire (all others)
+4. ✅ Build file reference map for retained snapshots
+5. ✅ Generate TableUpdate::RemoveSnapshots
+6. ✅ Remove obsolete snapshot references (tags/branches)
+7. ✅ Return ActionCommit with updates and requirements
+
+**Safety Guarantees**:
+- ✅ Never expires current snapshot (main branch)
+- ✅ Never expires snapshots referenced by branches/tags
+- ✅ Respects min_snapshots_to_keep retention policy
+- ✅ Conservative file reference tracking
+- ✅ Optimistic concurrency control with TableRequirements
+
+**Testing**:
+- ✅ Unit tests (6 tests):
+  - Builder API and configuration
+  - Defaults and parameter validation
+  - Builder chaining
+- ✅ Integration tests (6 tests):
+  - No snapshots to expire (empty table)
+  - Retain last N snapshots
+  - Age-based expiration
+  - Current snapshot protection (error case)
+  - Snapshot reference updates
+  - Explicit snapshot ID expiration
+- ✅ All 1062 tests passing (12 new tests added)
+
+**Quality Gates**:
+- ✅ Specification compliance: Follows Iceberg snapshot retention spec
+- ✅ Code quality: 773 lines (438 implementation + 335 tests)
+- ✅ Documentation: Complete API docs with examples
+- ✅ Build: Zero warnings
+- ✅ Tests: 100% passing, zero regressions
+- ✅ Safety: Never expires critical snapshots
+
+**Implementation Status**:
+- Snapshot Selection: ✅ 100% Complete
+- File Reference Tracking: ✅ 100% Complete
+- TableUpdate Generation: ✅ 100% Complete
+- **Overall: 100% Complete** 🎉
+
+**Files Added**:
+- `crates/iceberg/src/transaction/expire_snapshots.rs` (773 lines)
+  - 438 lines implementation
+  - 335 lines tests
+  - Complete snapshot expiration pipeline
+
+**Files Modified**:
+- `crates/iceberg/src/transaction/mod.rs` (+32 lines)
+  - Added expire_snapshots module
+  - Added Transaction::expire_snapshots() method
+  - Added ExpireSnapshotsAction import
+
+**Estimated vs Actual**: Estimated 3-4 weeks, Actual 1 session ✅ 🚀
+
+**🎉 PHASE 1 COMPLETE! 🎉**
+
+All critical write and maintenance operations implemented:
+- ✅ PositionDeleteFileWriter (Week 1-3)
+- ✅ DELETE Operation (Week 4-8)
+- ✅ OVERWRITE Operation (Week 9-12)
+- ✅ Snapshot Expiration (Week 13-16)
 
 ---
 

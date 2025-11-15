@@ -55,6 +55,7 @@ mod action;
 pub use action::*;
 mod append;
 mod delete;
+mod expire_snapshots;
 mod overwrite;
 mod snapshot;
 mod sort_order;
@@ -74,6 +75,7 @@ use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
 use crate::transaction::delete::DeleteAction;
+use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
 use crate::transaction::overwrite::OverwriteAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
@@ -201,6 +203,37 @@ impl Transaction {
     /// ```
     pub fn overwrite(&self) -> OverwriteAction {
         OverwriteAction::new()
+    }
+
+    /// Creates an EXPIRE SNAPSHOTS action.
+    ///
+    /// The EXPIRE SNAPSHOTS action removes old snapshots from table metadata
+    /// based on age or retention policies. This is essential for managing
+    /// metadata size and preventing unbounded storage growth.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use iceberg::transaction::Transaction;
+    /// use chrono::{Duration, Utc};
+    /// # use iceberg::Result;
+    ///
+    /// # fn example(table: iceberg::table::Table) -> Result<()> {
+    /// let tx = Transaction::new(&table);
+    ///
+    /// // Expire snapshots older than 7 days, keep at least 5
+    /// let cutoff = Utc::now() - Duration::days(7);
+    /// let expire_action = tx
+    ///     .expire_snapshots()
+    ///     .expire_older_than(cutoff.timestamp_millis())
+    ///     .retain_last(5);
+    ///
+    /// let tx = expire_action.apply(tx)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn expire_snapshots(&self) -> ExpireSnapshotsAction {
+        ExpireSnapshotsAction::new()
     }
 
     /// Creates replace sort order action.
