@@ -55,6 +55,7 @@ mod action;
 pub use action::*;
 mod append;
 mod delete;
+mod overwrite;
 mod snapshot;
 mod sort_order;
 mod update_location;
@@ -73,6 +74,7 @@ use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
 use crate::transaction::delete::DeleteAction;
+use crate::transaction::overwrite::OverwriteAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
 use crate::transaction::update_properties::UpdatePropertiesAction;
@@ -169,6 +171,36 @@ impl Transaction {
     /// ```
     pub fn delete(&self) -> DeleteAction {
         DeleteAction::new()
+    }
+
+    /// Creates an OVERWRITE action.
+    ///
+    /// The OVERWRITE action replaces data in the table with new data.
+    /// Supports both dynamic (partition-based) and static (full table) modes.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use iceberg::transaction::Transaction;
+    /// use iceberg::expr::Reference;
+    /// use iceberg::spec::DataFile;
+    /// # use iceberg::Result;
+    ///
+    /// # fn example(table: iceberg::table::Table, new_files: Vec<DataFile>) -> Result<()> {
+    /// let tx = Transaction::new(&table);
+    ///
+    /// // Dynamic overwrite - replace specific partition
+    /// let overwrite_action = tx
+    ///     .overwrite()
+    ///     .with_partition_filter(Reference::new("date").equal_to("2024-01-01"))
+    ///     .with_data_files(new_files);
+    ///
+    /// let tx = overwrite_action.apply(tx)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn overwrite(&self) -> OverwriteAction {
+        OverwriteAction::new()
     }
 
     /// Creates replace sort order action.
