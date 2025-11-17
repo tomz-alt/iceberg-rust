@@ -12,9 +12,10 @@
 
 ### Compaction (Week 4 - Current)
 - [x] Data rewriting infrastructure ✅
-- [ ] Implement Parquet reader integration
+- [x] Implement Parquet writer setup ✅
+- [ ] Implement selective file reading (FileScanTask creation)
 - [ ] Implement data combining/batch merging logic
-- [ ] Implement Parquet writer with target size handling
+- [ ] Complete end-to-end rewrite with actual data
 - [ ] Add progress tracking and metrics
 - [ ] Write unit tests for rewrite logic
 
