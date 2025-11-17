@@ -10,14 +10,14 @@
 - [ ] Add CopyOnWrite strategy (optional)
 - [ ] Add Auto mode statistics-based selection
 
-### Compaction (Week 4 - Current)
+### Compaction (Week 4 - Complete ✅)
 - [x] Data rewriting infrastructure ✅
 - [x] Implement Parquet writer setup ✅
-- [ ] Implement selective file reading (FileScanTask creation)
-- [ ] Implement data combining/batch merging logic
-- [ ] Complete end-to-end rewrite with actual data
-- [ ] Add progress tracking and metrics
-- [ ] Write unit tests for rewrite logic
+- [x] Implement selective file reading (FileScanTask creation) ✅
+- [x] Implement data combining/batch merging logic ✅
+- [x] Complete end-to-end rewrite with actual data ✅
+- [ ] Add progress tracking and metrics (optional)
+- [ ] Write unit tests for rewrite logic (Week 5)
 
 ## Medium Priority
 

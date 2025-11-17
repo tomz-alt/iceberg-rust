@@ -48,9 +48,33 @@ let compact = tx
 
 **Implementation:**
 - `build_compaction_plan()` - Load → filter → group → bin pack ✅
-- `rewrite_file_group()` - Read → combine → write (infrastructure only)
+- `rewrite_file_group()` - Read → combine → write ✅
 - Bin packing: First-Fit Decreasing algorithm ✅
 - 21 unit tests passing ✅
+
+**Data Rewriting Pattern:**
+```rust
+// Create FileScanTask for each input file
+let scan_tasks: Vec<FileScanTask> = file_group.input_files.iter().map(|f| {
+    FileScanTask {
+        data_file_path: f.file_path.clone(),
+        length: f.file_size_in_bytes,
+        schema: schema.clone(),
+        project_field_ids: schema.as_struct().fields().iter().map(|f| f.id).collect(),
+        // ... other fields
+    }
+}).collect();
+
+// Create stream and read with ArrowReader
+let task_stream = stream::iter(scan_tasks.into_iter().map(Ok)).boxed();
+let reader = ArrowReaderBuilder::new(file_io).build();
+let mut batches = reader.read(task_stream)?;
+
+// Write to output
+while let Some(batch) = batches.next().await {
+    data_writer.write(batch?).await?;
+}
+```
 
 **Spec Compliance:**
 - ✅ Bin packing algorithm (spec allows pluggable strategies)
@@ -64,7 +88,7 @@ let compact = tx
 **Status:**
 - Design & Planning: 100% ✅
 - File Analysis: 100% ✅
-- Data Rewriting: 60% (writer setup complete, reader pending)
+- Data Rewriting: 100% ✅ (Week 4 complete)
 
 ## Position Delete Writer
 

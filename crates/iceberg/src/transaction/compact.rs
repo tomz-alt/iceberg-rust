@@ -62,12 +62,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{stream, StreamExt};
 use parquet::file::properties::WriterProperties;
 use uuid::Uuid;
 
+use crate::arrow::ArrowReaderBuilder;
 use crate::error::Result;
 use crate::expr::Predicate;
+use crate::scan::FileScanTask;
 use crate::spec::{DataFile, DataFileFormat, PartitionKey};
 use crate::table::Table;
 use crate::transaction::{ActionCommit, TransactionAction};
@@ -329,31 +331,46 @@ impl CompactAction {
             .build(Some(file_group.partition.clone()))
             .await?;
 
-        // Step 2: Read all input files and write data
-        // Note: For full implementation, we need to:
-        // 1. Create FileScanTask for each specific file in the group
-        // 2. Read only those files (not all files in partition)
-        // 3. Combine all batches and write
-        //
-        // Current limitation: table.scan().plan_files() returns ALL files,
-        // not just the ones we want to compact. We need a way to create
-        // FileScanTask instances for specific files.
-        //
-        // For now, return success with stats to demonstrate the flow works
+        // Step 2: Create FileScanTask instances for each input file
+        // We need to manually create FileScanTask for each specific file we want to read
+        let project_field_ids = schema.as_struct().fields().iter().map(|f| f.id).collect::<Vec<_>>();
 
-        // Close writer (even though we haven't written anything yet)
-        // This demonstrates the writer infrastructure is set up correctly
-        data_writer.close().await?;
+        let scan_tasks: Vec<FileScanTask> = file_group
+            .input_files
+            .iter()
+            .map(|data_file| FileScanTask {
+                start: 0,
+                length: data_file.file_size_in_bytes,
+                record_count: Some(data_file.record_count),
+                data_file_path: data_file.file_path.clone(),
+                data_file_format: data_file.file_format,
+                schema: schema.clone(),
+                project_field_ids: project_field_ids.clone(),
+                predicate: None,
+                deletes: vec![],
+                partition: Some(data_file.partition.clone()),
+                partition_spec: None, // Will be handled by reader
+                name_mapping: None,
+            })
+            .collect();
 
-        // Return empty for now - will be populated when we implement file reading
-        // TODO: Implement selective file reading
-        Err(Error::new(
-            ErrorKind::FeatureUnsupported,
-            format!(
-                "Writer infrastructure complete. Need to implement selective file reading for {} input files",
-                file_group.input_files.len()
-            ),
-        ))
+        // Step 3: Create a stream from the scan tasks
+        let task_stream = stream::iter(scan_tasks.into_iter().map(Ok)).boxed();
+
+        // Step 4: Use ArrowReader to read all the files
+        let reader = ArrowReaderBuilder::new(file_io.clone()).build();
+        let mut record_batch_stream = reader.read(task_stream)?;
+
+        // Step 5: Read all batches and write them to the output file
+        while let Some(batch) = record_batch_stream.next().await {
+            let batch = batch?;
+            data_writer.write(batch).await?;
+        }
+
+        // Step 6: Close the writer and get the output data files
+        let data_files = data_writer.close().await?;
+
+        Ok(data_files)
     }
 
     /// Build a compaction plan by analyzing the table's data files.
