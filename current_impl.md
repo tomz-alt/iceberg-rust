@@ -52,6 +52,15 @@ let compact = tx
 - Bin packing: First-Fit Decreasing algorithm ✅
 - 21 unit tests passing ✅
 
+**Spec Compliance:**
+- ✅ Bin packing algorithm (spec allows pluggable strategies)
+- ✅ Config parameters match Java defaults (target: 512MB, min: 64MB, max: 100GB)
+- ⚠️ Must use `Operation::Replace` for snapshot (not implemented yet)
+- ⚠️ Must preserve partition boundaries (grouping planned, not enforced)
+- ⚠️ Must preserve schema (not implemented)
+- ❌ Manifest updates (mark input as DELETED, output as ADDED) - pending
+- See: PHASE2_COMPACTION_FACT_CHECK.md for full analysis
+
 **Status:**
 - Design & Planning: 100% ✅
 - File Analysis: 100% ✅
