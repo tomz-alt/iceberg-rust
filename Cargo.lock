@@ -3711,6 +3711,7 @@ dependencies = [
  "iceberg_test_utils",
  "ordered-float 2.10.1",
  "parquet",
+ "serde_json",
  "tokio",
  "uuid",
 ]

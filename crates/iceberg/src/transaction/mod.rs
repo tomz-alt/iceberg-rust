@@ -54,6 +54,7 @@ mod action;
 
 pub use action::*;
 mod append;
+mod compact;
 mod delete;
 mod expire_snapshots;
 mod overwrite;
@@ -74,6 +75,7 @@ use crate::spec::TableProperties;
 use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
+use crate::transaction::compact::CompactAction;
 use crate::transaction::delete::DeleteAction;
 use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
 use crate::transaction::overwrite::OverwriteAction;
@@ -234,6 +236,36 @@ impl Transaction {
     /// ```
     pub fn expire_snapshots(&self) -> ExpireSnapshotsAction {
         ExpireSnapshotsAction::new()
+    }
+
+    /// Creates a COMPACT action.
+    ///
+    /// The COMPACT action combines small data files into larger ones,
+    /// reducing metadata overhead and improving query efficiency.
+    /// This is especially useful for streaming workloads that produce
+    /// many small files.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use iceberg::transaction::Transaction;
+    /// # use iceberg::Result;
+    ///
+    /// # fn example(table: iceberg::table::Table) -> Result<()> {
+    /// let tx = Transaction::new(&table);
+    ///
+    /// // Compact files smaller than 64 MB into 512 MB files
+    /// let compact_action = tx
+    ///     .compact()
+    ///     .with_target_file_size_bytes(512 * 1024 * 1024)
+    ///     .with_min_file_size_bytes(64 * 1024 * 1024);
+    ///
+    /// let tx = compact_action.apply(tx)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn compact(&self) -> CompactAction {
+        CompactAction::new()
     }
 
     /// Creates replace sort order action.

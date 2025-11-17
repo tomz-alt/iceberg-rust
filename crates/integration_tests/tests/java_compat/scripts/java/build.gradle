@@ -1,0 +1,45 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'org.apache.iceberg.rust.compat'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Apache Iceberg
+    implementation 'org.apache.iceberg:iceberg-core:1.7.1'
+    implementation 'org.apache.iceberg:iceberg-api:1.7.1'
+    implementation 'org.apache.iceberg:iceberg-parquet:1.7.1'
+    implementation 'org.apache.iceberg:iceberg-data:1.7.1'
+
+    // Parquet
+    implementation 'org.apache.parquet:parquet-avro:1.14.3'
+
+    // Hadoop (for local FileIO)
+    implementation 'org.apache.hadoop:hadoop-common:3.4.1'
+    implementation 'org.apache.hadoop:hadoop-mapreduce-client-core:3.4.1'
+
+    // Logging
+    implementation 'org.slf4j:slf4j-simple:2.0.16'
+
+    // Testing
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+test {
+    useJUnitPlatform()
+}
+
+application {
+    mainClass = 'org.apache.iceberg.rust.compat.CreateTestTables'
+}

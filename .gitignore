@@ -26,3 +26,6 @@ dist/*
 *.pyc
 *.whl
 *.tar.gz
+
+# Generated test data
+crates/integration_tests/tests/java_compat/data/java_created/
