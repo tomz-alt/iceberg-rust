@@ -79,16 +79,19 @@ while let Some(batch) = batches.next().await {
 **Spec Compliance:**
 - ✅ Bin packing algorithm (spec allows pluggable strategies)
 - ✅ Config parameters match Java defaults (target: 512MB, min: 64MB, max: 100GB)
-- ⚠️ Must use `Operation::Replace` for snapshot (not implemented yet)
-- ⚠️ Must preserve partition boundaries (grouping planned, not enforced)
-- ⚠️ Must preserve schema (not implemented)
-- ❌ Manifest updates (mark input as DELETED, output as ADDED) - pending
-- See: PHASE2_COMPACTION_FACT_CHECK.md for full analysis
+- ✅ `Operation::Replace` for snapshot (implemented)
+- ✅ Preserves partition boundaries (grouping by partition)
+- ✅ Preserves schema (uses table schema)
+- ✅ Manifest updates (input as DELETED, output as ADDED)
+- ✅ Preserves sequence numbers when marking deleted
+- See: PHASE2_COMPACTION_FACT_CHECK.md for analysis
 
 **Status:**
 - Design & Planning: 100% ✅
 - File Analysis: 100% ✅
-- Data Rewriting: 100% ✅ (Week 4 complete)
+- Data Rewriting: 100% ✅ (Week 4)
+- Manifest & Snapshot: 100% ✅ (Week 5)
+- **Ready for integration testing**
 
 ## Position Delete Writer
 

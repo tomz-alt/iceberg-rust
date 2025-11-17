@@ -70,9 +70,14 @@ use crate::arrow::ArrowReaderBuilder;
 use crate::error::Result;
 use crate::expr::Predicate;
 use crate::scan::FileScanTask;
-use crate::spec::{DataFile, DataFileFormat, PartitionKey};
+use crate::spec::{
+    DataFile, DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType,
+    ManifestListWriter, ManifestWriterBuilder, Operation, PartitionKey, Snapshot,
+    SnapshotReference, SnapshotRetention, Summary,
+};
 use crate::table::Table;
 use crate::transaction::{ActionCommit, TransactionAction};
+use crate::{TableRequirement, TableUpdate};
 use crate::writer::base_writer::data_file_writer::DataFileWriterBuilder;
 use crate::writer::file_writer::location_generator::{
     DefaultFileNameGenerator, DefaultLocationGenerator,
@@ -543,18 +548,223 @@ impl TransactionAction for CompactAction {
             all_output_files.extend(output_files);
         }
 
-        // TODO: Step 2: Build manifests
-        // TODO: Step 3: Create snapshot
+        // Step 2: Load existing manifest entries for input files (to preserve sequence numbers)
+        let input_file_paths: std::collections::HashSet<String> =
+            all_input_files.iter().map(|f| f.file_path.clone()).collect();
 
-        Err(Error::new(
-            ErrorKind::FeatureUnsupported,
-            format!(
-                "Compaction executed successfully! Rewrote {} input files into {} output files. \
-                Next: Build manifests and create snapshot.",
-                all_input_files.len(),
-                all_output_files.len()
+        let mut input_entries = Vec::new();
+        if let Some(current_snapshot) = table.metadata().current_snapshot() {
+            let file_io = table.file_io();
+            let manifest_list = current_snapshot
+                .load_manifest_list(&file_io, &table.metadata_ref())
+                .await?;
+
+            // Find manifest entries for input files
+            for manifest_file in manifest_list.entries() {
+                let manifest = manifest_file.load_manifest(&file_io).await?;
+
+                for entry in manifest.entries() {
+                    if entry.is_alive() && input_file_paths.contains(entry.file_path()) {
+                        input_entries.push(entry.as_ref().clone());
+                    }
+                }
+            }
+        }
+
+        // Step 3: Build manifest with DELETED and ADDED entries
+        let commit_uuid = self.commit_uuid.unwrap_or_else(|| Uuid::new_v4());
+        let snapshot_id = Self::generate_unique_snapshot_id(table);
+        let file_io = table.file_io();
+
+        const META_ROOT_PATH: &str = "metadata";
+        let manifest_path = format!(
+            "{}/{}/{}-m0.avro",
+            table.metadata().location(),
+            META_ROOT_PATH,
+            commit_uuid
+        );
+
+        let output_file = file_io.new_output(manifest_path)?;
+
+        // Use the partition spec from the first file group
+        let partition_spec = if let Some(first_group) = plan.file_groups.first() {
+            table
+                .metadata()
+                .partition_spec_by_id(first_group.partition_spec_id)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!("Partition spec {} not found", first_group.partition_spec_id),
+                    )
+                })?
+                .as_ref()
+                .clone()
+        } else {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "No file groups in compaction plan",
+            ));
+        };
+
+        // Create manifest writer
+        let builder = ManifestWriterBuilder::new(
+            output_file,
+            Some(snapshot_id),
+            self.key_metadata.clone(),
+            table.metadata().current_schema().clone(),
+            partition_spec,
+        );
+
+        let mut manifest_writer = match table.metadata().format_version() {
+            FormatVersion::V1 => {
+                return Err(Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    "COMPACT operation requires table format version 2 or higher.",
+                ));
+            }
+            FormatVersion::V2 => builder.build_v2_data(),
+            FormatVersion::V3 => builder.build_v3_data(),
+        };
+
+        let next_seq_num = table.metadata().next_sequence_number();
+
+        // Mark input files as DELETED
+        for entry in input_entries {
+            manifest_writer.add_delete_entry(entry)?;
+        }
+
+        // Add output files as ADDED
+        for output_file in all_output_files.clone() {
+            manifest_writer.add_file(output_file, next_seq_num)?;
+        }
+
+        // Write manifest
+        let compact_manifest = manifest_writer.write_manifest_file().await?;
+
+        // Step 4: Create manifest list
+        let manifest_list_path = format!(
+            "{}/{}/snap-{}-0-{}.avro",
+            table.metadata().location(),
+            META_ROOT_PATH,
+            snapshot_id,
+            commit_uuid
+        );
+
+        let mut manifest_list_writer = match table.metadata().format_version() {
+            FormatVersion::V1 => unreachable!("V1 check already performed"),
+            FormatVersion::V2 => ManifestListWriter::v2(
+                file_io.new_output(manifest_list_path.clone())?,
+                snapshot_id,
+                table.metadata().current_snapshot_id(),
+                next_seq_num,
             ),
-        ))
+            FormatVersion::V3 => {
+                let first_row_id = table.metadata().next_row_id();
+                ManifestListWriter::v3(
+                    file_io.new_output(manifest_list_path.clone())?,
+                    snapshot_id,
+                    table.metadata().current_snapshot_id(),
+                    next_seq_num,
+                    Some(first_row_id),
+                )
+            }
+        };
+
+        // Get existing manifests
+        let mut manifests = vec![];
+        if let Some(current_snapshot) = table.metadata().current_snapshot() {
+            let manifest_list = current_snapshot
+                .load_manifest_list(&file_io, &table.metadata_ref())
+                .await?;
+            manifests.extend(
+                manifest_list
+                    .entries()
+                    .iter()
+                    .filter(|m| m.content == ManifestContentType::Data)
+                    .cloned(),
+            );
+        }
+
+        // Add the compaction manifest
+        manifests.push(compact_manifest);
+        manifest_list_writer.add_manifests(manifests.into_iter())?;
+        manifest_list_writer.close().await?;
+
+        // Step 5: Create snapshot with Operation::Replace
+        let mut additional_properties = self.snapshot_properties.clone();
+        additional_properties.insert(
+            "added-data-files".to_string(),
+            all_output_files.len().to_string(),
+        );
+        additional_properties.insert(
+            "deleted-data-files".to_string(),
+            all_input_files.len().to_string(),
+        );
+
+        let summary = Summary {
+            operation: Operation::Replace,
+            additional_properties,
+        };
+
+        let commit_ts = chrono::Utc::now().timestamp_millis();
+        let new_snapshot = Snapshot::builder()
+            .with_manifest_list(manifest_list_path)
+            .with_snapshot_id(snapshot_id)
+            .with_parent_snapshot_id(table.metadata().current_snapshot_id())
+            .with_sequence_number(next_seq_num)
+            .with_summary(summary)
+            .with_schema_id(table.metadata().current_schema_id())
+            .with_timestamp_ms(commit_ts)
+            .build();
+
+        // Step 6: Return ActionCommit
+        let updates = vec![
+            TableUpdate::AddSnapshot {
+                snapshot: new_snapshot,
+            },
+            TableUpdate::SetSnapshotRef {
+                ref_name: MAIN_BRANCH.to_string(),
+                reference: SnapshotReference::new(
+                    snapshot_id,
+                    SnapshotRetention::branch(None, None, None),
+                ),
+            },
+        ];
+
+        let requirements = vec![
+            TableRequirement::UuidMatch {
+                uuid: table.metadata().uuid(),
+            },
+            TableRequirement::RefSnapshotIdMatch {
+                r#ref: MAIN_BRANCH.to_string(),
+                snapshot_id: table.metadata().current_snapshot_id(),
+            },
+        ];
+
+        Ok(ActionCommit::new(updates, requirements))
+    }
+}
+
+impl CompactAction {
+    /// Generate a unique snapshot ID that doesn't conflict with existing snapshots.
+    fn generate_unique_snapshot_id(table: &Table) -> i64 {
+        let generate_random_id = || -> i64 {
+            let (lhs, rhs) = Uuid::new_v4().as_u64_pair();
+            let snapshot_id = (lhs ^ rhs) as i64;
+            if snapshot_id < 0 {
+                -snapshot_id
+            } else {
+                snapshot_id
+            }
+        };
+        let mut snapshot_id = generate_random_id();
+
+        // Ensure uniqueness by checking against existing snapshots
+        while table.metadata().snapshot_by_id(snapshot_id).is_some() {
+            snapshot_id = generate_random_id();
+        }
+
+        snapshot_id
     }
 }
 

@@ -10,22 +10,23 @@
 - [ ] Add CopyOnWrite strategy (optional)
 - [ ] Add Auto mode statistics-based selection
 
-### Compaction (Week 4 - Complete ✅)
+### Compaction (Weeks 4-5 - Complete ✅)
 - [x] Data rewriting infrastructure ✅
 - [x] Implement Parquet writer setup ✅
 - [x] Implement selective file reading (FileScanTask creation) ✅
 - [x] Implement data combining/batch merging logic ✅
 - [x] Complete end-to-end rewrite with actual data ✅
-- [ ] Add progress tracking and metrics (optional)
-- [ ] Write unit tests for rewrite logic (Week 5)
+- [x] Build manifests for compacted files ✅
+- [x] Create snapshot with Operation::Replace ✅
+- [x] Load existing manifest entries and preserve sequence numbers ✅
 
 ## Medium Priority
 
-### Compaction (Week 5-7)
-- [ ] Build manifests for compacted files
-- [ ] Create snapshot with Operation::Replace
-- [ ] Integration tests
+### Compaction (Week 6-7 - Testing)
+- [ ] Write unit tests for commit() flow
+- [ ] Integration tests (end-to-end compaction)
 - [ ] Java compatibility tests
+- [ ] Add progress tracking and metrics (optional)
 
 ### Testing Infrastructure
 - [ ] Fix pre-existing manifest field processing issue
